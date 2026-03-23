@@ -1,0 +1,19 @@
+# Discord Voice TTS 插件依赖
+
+# Discord API 库
+discord.py>=2.3.0
+
+# TTS 引擎 (推荐)
+edge-tts>=6.1.0
+
+# Discord 语音支持
+PyNaCl>=1.5.0
+
+# 异步支持 (通常已内置)
+asyncio
+
+# 文件路径处理
+pathlib
+
+# 类型提示
+typing
