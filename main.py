@@ -434,11 +434,11 @@ class DiscordVoiceTTS(Star):
         except Exception as e:
             logger.error(f"打断播放失败: {e}")
             
-    @filter.command("tts_join")
+    @filter.command("dv_tts_join")
     async def join_voice_channel(self, event: AstrMessageEvent):
         """加入语音频道
         
-        用法: /tts_join
+        用法: /dv_tts_join
         需要用户在语音频道中
         """
         try:
@@ -476,11 +476,11 @@ class DiscordVoiceTTS(Star):
             logger.error(f"加入语音频道失败: {e}")
             yield event.plain_result(f"加入语音频道失败: {str(e)}")
             
-    @filter.command("tts_leave")
+    @filter.command("dv_tts_leave")
     async def leave_voice_channel(self, event: AstrMessageEvent):
         """离开语音频道
         
-        用法: /tts_leave
+        用法: /dv_tts_leave
         """
         try:
             guild = event.message_obj.guild
@@ -501,12 +501,12 @@ class DiscordVoiceTTS(Star):
             logger.error(f"离开语音频道失败: {e}")
             yield event.plain_result(f"离开语音频道失败: {str(e)}")
             
-    @filter.command("tts")
+    @filter.command("dv_tts")
     async def tts_command(self, event: AstrMessageEvent):
-        """TTS 命令
+        """TTS 语音合成命令
         
-        用法: /tts <文本>
-        将文本转换为语音并播放
+        用法: /dv_tts <文本>
+        将文本转换为语音并播放（自动检测中文/日语）
         """
         try:
             # 获取文本
@@ -516,8 +516,8 @@ class DiscordVoiceTTS(Star):
                 return
                 
             # 移除命令部分
-            if text.startswith("/tts"):
-                text = text[4:].strip()
+            if text.startswith("/dv_tts"):
+                text = text[7:].strip()
                 
             if not text:
                 yield event.plain_result("请提供要转换的文本")
@@ -562,11 +562,11 @@ class DiscordVoiceTTS(Star):
             logger.error(f"TTS 命令执行失败: {e}")
             yield event.plain_result(f"TTS 命令执行失败: {str(e)}")
             
-    @filter.command("tts_stop")
+    @filter.command("dv_tts_stop")
     async def stop_tts(self, event: AstrMessageEvent):
         """停止当前 TTS 播放
         
-        用法: /tts_stop
+        用法: /dv_tts_stop
         """
         try:
             guild = event.message_obj.guild
@@ -597,18 +597,18 @@ class DiscordVoiceTTS(Star):
             logger.error(f"停止 TTS 失败: {e}")
             yield event.plain_result(f"停止 TTS 失败: {str(e)}")
             
-    @filter.command("tts_config")
+    @filter.command("dv_tts_config")
     async def config_tts(self, event: AstrMessageEvent):
         """配置 TTS 设置
 
         用法:
-          /tts_config voice_zh <edge-tts 语音名>  - 设置中文语音 (edge-tts)
-          /tts_config voice_ja <VoiceVox Speaker ID>  - 设置日语语音 (VoiceVox, 整数 ID)
-          /tts_config rate <语速>  - edge-tts 语速 (如: +20%)
-          /tts_config volume <音量>  - edge-tts 音量 (如: +10%)
-          /tts_config voicevox_url <URL>  - VoiceVox 引擎地址 (默认 http://localhost:50021)
-          /tts_config voicevox_speed <速度>  - VoiceVox 语速倍率 (浮点数, 默认 1.0)
-          /tts_config voicevox_pitch <音调>  - VoiceVox 音调偏移 (浮点数, 默认 0.0)
+          /dv_tts_config voice_zh <edge-tts 语音名>  - 设置中文语音 (edge-tts)
+          /dv_tts_config voice_ja <VoiceVox Speaker ID>  - 设置日语语音 (VoiceVox, 整数 ID)
+          /dv_tts_config rate <语速>  - edge-tts 语速 (如: +20%)
+          /dv_tts_config volume <音量>  - edge-tts 音量 (如: +10%)
+          /dv_tts_config voicevox_url <URL>  - VoiceVox 引擎地址 (默认 http://localhost:50021)
+          /dv_tts_config voicevox_speed <速度>  - VoiceVox 语速倍率 (浮点数, 默认 1.0)
+          /dv_tts_config voicevox_pitch <音调>  - VoiceVox 音调偏移 (浮点数, 默认 0.0)
         """
         try:
             message_str = event.message_str
@@ -617,13 +617,13 @@ class DiscordVoiceTTS(Star):
             if len(parts) < 3:
                 yield event.plain_result(
                     "用法:\n"
-                    "/tts_config voice_zh <edge-tts 语音名> - 设置中文语音 (edge-tts)\n"
-                    "/tts_config voice_ja <Speaker ID> - 设置日语 VoiceVox 说话人 ID (整数)\n"
-                    "/tts_config rate <语速> - edge-tts 语速 (如: +20%)\n"
-                    "/tts_config volume <音量> - edge-tts 音量 (如: +10%)\n"
-                    "/tts_config voicevox_url <URL> - VoiceVox 引擎地址\n"
-                    "/tts_config voicevox_speed <倍率> - VoiceVox 语速 (如: 1.2)\n"
-                    "/tts_config voicevox_pitch <偏移> - VoiceVox 音调 (如: 0.05)"
+                    "/dv_tts_config voice_zh <edge-tts 语音名> - 设置中文语音 (edge-tts)\n"
+                    "/dv_tts_config voice_ja <Speaker ID> - 设置日语 VoiceVox 说话人 ID (整数)\n"
+                    "/dv_tts_config rate <语速> - edge-tts 语速 (如: +20%)\n"
+                    "/dv_tts_config volume <音量> - edge-tts 音量 (如: +10%)\n"
+                    "/dv_tts_config voicevox_url <URL> - VoiceVox 引擎地址\n"
+                    "/dv_tts_config voicevox_speed <倍率> - VoiceVox 语速 (如: 1.2)\n"
+                    "/dv_tts_config voicevox_pitch <偏移> - VoiceVox 音调 (如: 0.05)"
                 )
                 return
                 
@@ -638,7 +638,7 @@ class DiscordVoiceTTS(Star):
                     self.tts_voice_ja_id = int(config_value)
                     yield event.plain_result(f"日语 VoiceVox 说话人 ID 已设置为: {config_value}")
                 except ValueError:
-                    yield event.plain_result("VoiceVox Speaker ID 必须为整数，例如: /tts_config voice_ja 2")
+                    yield event.plain_result("VoiceVox Speaker ID 必须为整数，例如: /dv_tts_config voice_ja 2")
             elif config_type == "rate":
                 self.tts_rate = config_value
                 yield event.plain_result(f"edge-tts 语速已设置为: {config_value}")
@@ -653,13 +653,13 @@ class DiscordVoiceTTS(Star):
                     self.tts_voicevox_speed = float(config_value)
                     yield event.plain_result(f"VoiceVox 语速已设置为: {config_value}")
                 except ValueError:
-                    yield event.plain_result("VoiceVox 语速必须为浮点数，例如: /tts_config voicevox_speed 1.2")
+                    yield event.plain_result("VoiceVox 语速必须为浮点数，例如: /dv_tts_config voicevox_speed 1.2")
             elif config_type == "voicevox_pitch":
                 try:
                     self.tts_voicevox_pitch = float(config_value)
                     yield event.plain_result(f"VoiceVox 音调已设置为: {config_value}")
                 except ValueError:
-                    yield event.plain_result("VoiceVox 音调必须为浮点数，例如: /tts_config voicevox_pitch 0.05")
+                    yield event.plain_result("VoiceVox 音调必须为浮点数，例如: /dv_tts_config voicevox_pitch 0.05")
             else:
                 yield event.plain_result(
                     f"未知的配置类型: {config_type}\n"
@@ -670,11 +670,11 @@ class DiscordVoiceTTS(Star):
             logger.error(f"配置 TTS 失败: {e}")
             yield event.plain_result(f"配置 TTS 失败: {str(e)}")
             
-    @filter.command("tts_status")
+    @filter.command("dv_tts_status")
     async def tts_status(self, event: AstrMessageEvent):
         """查看 TTS 状态
         
-        用法: /tts_status
+        用法: /dv_tts_status
         """
         try:
             guild = event.message_obj.guild
@@ -730,45 +730,45 @@ class DiscordVoiceTTS(Star):
             logger.error(f"获取 TTS 状态失败: {e}")
             yield event.plain_result(f"获取 TTS 状态失败: {str(e)}")
             
-    @filter.command("tts_help")
+    @filter.command("dv_tts_help")
     async def tts_help(self, event: AstrMessageEvent):
         """显示 TTS 帮助信息
         
-        用法: /tts_help
+        用法: /dv_tts_help
         """
         help_text = """
 === Discord 语音频道 TTS 插件 ===
 
 命令列表:
-/tts_join - 加入语音频道 (需要先在语音频道中)
-/tts_leave - 离开语音频道
-/tts <文本> - 将文本转换为语音并播放 (自动检测中/日语)
-/tts_stop - 停止当前 TTS 播放
-/tts_config voice_zh <语音名> - 设置中文语音 (edge-tts)
-/tts_config voice_ja <Speaker ID> - 设置日语说话人 ID (VoiceVox)
-/tts_config rate <语速> - edge-tts 语速 (如: +20%)
-/tts_config volume <音量> - edge-tts 音量 (如: +10%)
-/tts_config voicevox_url <URL> - VoiceVox 引擎地址
-/tts_config voicevox_speed <倍率> - VoiceVox 语速 (如: 1.2)
-/tts_config voicevox_pitch <偏移> - VoiceVox 音调 (如: 0.05)
-/tts_status - 查看 TTS 状态
-/tts_help - 显示此帮助信息
+/dv_tts_join - 加入语音频道 (需要先在语音频道中)
+/dv_tts_leave - 离开语音频道
+/dv_tts <文本> - 将文本转换为语音并播放 (自动检测中/日语)
+/dv_tts_stop - 停止当前 TTS 播放
+/dv_tts_config voice_zh <语音名> - 设置中文语音 (edge-tts)
+/dv_tts_config voice_ja <Speaker ID> - 设置日语说话人 ID (VoiceVox)
+/dv_tts_config rate <语速> - edge-tts 语速 (如: +20%)
+/dv_tts_config volume <音量> - edge-tts 音量 (如: +10%)
+/dv_tts_config voicevox_url <URL> - VoiceVox 引擎地址
+/dv_tts_config voicevox_speed <倍率> - VoiceVox 语速 (如: 1.2)
+/dv_tts_config voicevox_pitch <偏移> - VoiceVox 音调 (如: 0.05)
+/dv_tts_status - 查看 TTS 状态
+/dv_tts_help - 显示此帮助信息
 
 TTS 引擎说明:
   • 中文/其他语言 → edge-tts (微软神经网络 TTS)
   • 日语 (含假名) → VoiceVox HTTP API (本地引擎)
 
 示例:
-/tts_join
-/tts 你好，世界！
-/tts こんにちは！
-/tts_config voice_zh zh-CN-YunxiNeural
-/tts_config voice_ja 3
-/tts_config rate +10%
-/tts_config voicevox_url http://localhost:50021
-/tts_config voicevox_speed 1.2
-/tts_stop
-/tts_leave
+/dv_tts_join
+/dv_tts 你好，世界！
+/dv_tts こんにちは！
+/dv_tts_config voice_zh zh-CN-YunxiNeural
+/dv_tts_config voice_ja 3
+/dv_tts_config rate +10%
+/dv_tts_config voicevox_url http://localhost:50021
+/dv_tts_config voicevox_speed 1.2
+/dv_tts_stop
+/dv_tts_leave
 
 支持的中文语音 (edge-tts):
 - zh-CN-XiaoxiaoNeural (女声，温柔)
