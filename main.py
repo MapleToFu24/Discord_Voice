@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import tempfile
 from collections import defaultdict
 from typing import Dict, Optional
@@ -18,7 +19,14 @@ try:
     EDGE_TTS_AVAILABLE = True
 except ImportError:
     EDGE_TTS_AVAILABLE = False
-    logger.warning("edge-tts not installed. TTS functionality will be limited.")
+    logger.warning("edge-tts not installed. Chinese TTS functionality will be limited.")
+
+try:
+    import aiohttp
+    AIOHTTP_AVAILABLE = True
+except ImportError:
+    AIOHTTP_AVAILABLE = False
+    logger.warning("aiohttp not installed. VoiceVox TTS functionality will be limited.")
 
 try:
     from astrbot.api import tts as astrbot_tts
@@ -26,6 +34,26 @@ try:
 except ImportError:
     ASTRBOT_TTS_AVAILABLE = False
     logger.warning("AstrBot TTS module not available.")
+
+# ---- Language detection helpers ----
+
+_CJK_JAPANESE_RE = re.compile(
+    r'[\u3040-\u309F\u30A0-\u30FF\u31F0-\u31FF]'  # Hiragana / Katakana
+)
+_CJK_CHINESE_RE = re.compile(
+    r'[\u4E00-\u9FFF\u3400-\u4DBF\u20000-\u2A6DF]'  # CJK Unified Ideographs
+)
+
+
+def detect_language(text: str) -> str:
+    """Detect whether text is primarily Japanese or Chinese.
+    
+    Returns:
+        'ja' if Japanese characters are found, 'zh' otherwise.
+    """
+    if _CJK_JAPANESE_RE.search(text):
+        return 'ja'
+    return 'zh'
 
 
 @register("discord_voice_tts", "YourName", "Discord 语音频道 TTS 插件", "1.0.0")
@@ -50,9 +78,16 @@ class DiscordVoiceTTS(Star):
         
         # TTS 配置
         self.tts_enabled_guilds: set = set()
-        self.tts_voice = "zh-CN-XiaoxiaoNeural"  # 默认中文语音
+        # edge-tts 中文语音
+        self.tts_voice_zh = "zh-CN-XiaoxiaoNeural"
+        # VoiceVox 日语语音 (speaker ID, 2 = ずんだもん)
+        self.tts_voice_ja_id = 2
         self.tts_rate = "+0%"
         self.tts_volume = "+0%"
+        # VoiceVox API endpoint (default: local server)
+        self.voicevox_url = "http://localhost:50021"
+        self.tts_voicevox_speed = 1.0  # VoiceVox 语速
+        self.tts_voicevox_pitch = 0.0  # VoiceVox 音调
         
         # 临时目录用于存储音频文件
         self.temp_dir = Path(tempfile.gettempdir()) / "astrbot_tts"
@@ -63,8 +98,12 @@ class DiscordVoiceTTS(Star):
         logger.info("Discord Voice TTS 插件已初始化")
         
         # 检查依赖
-        if not EDGE_TTS_AVAILABLE and not ASTRBOT_TTS_AVAILABLE:
-            logger.error("没有可用的 TTS 引擎，请安装 edge-tts 或确保 AstrBot TTS 模块可用")
+        if not EDGE_TTS_AVAILABLE:
+            logger.warning("edge-tts 未安装，中文 TTS 不可用。请运行: pip install edge-tts")
+        if not AIOHTTP_AVAILABLE:
+            logger.warning("aiohttp 未安装，VoiceVox 日语 TTS 不可用。请运行: pip install aiohttp")
+        if not EDGE_TTS_AVAILABLE and not AIOHTTP_AVAILABLE and not ASTRBOT_TTS_AVAILABLE:
+            logger.error("没有可用的 TTS 引擎，请安装 edge-tts 和/或 aiohttp")
             
     async def terminate(self):
         """插件销毁时清理资源"""
@@ -97,6 +136,10 @@ class DiscordVoiceTTS(Star):
     async def generate_tts_audio(self, text: str, guild_id: int) -> Optional[Path]:
         """生成 TTS 音频文件
         
+        自动检测语言：
+          - 包含日文假名 → VoiceVox-TTS (日语语音)
+          - 其他 (中文/英文等) → edge-tts (中文语音)
+        
         Args:
             text: 要转换的文本
             guild_id: 服务器 ID，用于生成唯一文件名
@@ -105,46 +148,119 @@ class DiscordVoiceTTS(Star):
             音频文件路径，失败返回 None
         """
         try:
-            # 生成唯一文件名
-            audio_file = self.temp_dir / f"tts_{guild_id}_{hash(text)}.mp3"
+            lang = detect_language(text)
             
-            # 如果文件已存在，直接返回
+            if lang == 'ja':
+                return await self._generate_voicevox_audio(text, guild_id)
+            else:
+                return await self._generate_edge_tts_audio(text, guild_id)
+                
+        except Exception as e:
+            logger.error(f"生成 TTS 音频失败: {e}")
+            return None
+
+    async def _generate_edge_tts_audio(self, text: str, guild_id: int) -> Optional[Path]:
+        """使用 edge-tts 生成中文音频
+        
+        Args:
+            text: 要转换的文本
+            guild_id: 服务器 ID
+            
+        Returns:
+            音频文件路径，失败返回 None
+        """
+        try:
+            if not EDGE_TTS_AVAILABLE:
+                logger.error("edge-tts 未安装，无法生成中文语音")
+                return None
+                
+            audio_file = self.temp_dir / f"tts_zh_{guild_id}_{hash(text)}.mp3"
+            
             if audio_file.exists():
                 return audio_file
                 
-            # 优先使用 edge-tts
-            if EDGE_TTS_AVAILABLE:
-                communicate = edge_tts.Communicate(
-                    text,
-                    voice=self.tts_voice,
-                    rate=self.tts_rate,
-                    volume=self.tts_volume
-                )
-                await communicate.save(str(audio_file))
-                logger.info(f"使用 edge-tts 生成音频: {audio_file}")
-                return audio_file
-                
-            # 备选使用 AstrBot TTS
-            elif ASTRBOT_TTS_AVAILABLE:
-                # 这里需要根据 AstrBot TTS 模块的实际 API 进行调整
-                # 假设有一个通用的 tts 方法
-                try:
-                    # 尝试使用 AstrBot TTS
-                    # 注意：这里需要根据实际的 AstrBot TTS API 进行调整
-                    audio_data = await astrbot_tts.generate(text)
-                    if audio_data:
-                        with open(audio_file, "wb") as f:
-                            f.write(audio_data)
-                        logger.info(f"使用 AstrBot TTS 生成音频: {audio_file}")
-                        return audio_file
-                except Exception as e:
-                    logger.error(f"AstrBot TTS 生成失败: {e}")
-                    
-            logger.error("没有可用的 TTS 引擎")
-            return None
+            communicate = edge_tts.Communicate(
+                text,
+                voice=self.tts_voice_zh,
+                rate=self.tts_rate,
+                volume=self.tts_volume
+            )
+            await communicate.save(str(audio_file))
+            logger.info(f"[edge-tts] 生成中文音频: {audio_file}")
+            return audio_file
             
         except Exception as e:
-            logger.error(f"生成 TTS 音频失败: {e}")
+            logger.error(f"edge-tts 生成音频失败: {e}")
+            return None
+
+    async def _generate_voicevox_audio(self, text: str, guild_id: int) -> Optional[Path]:
+        """使用 VoiceVox HTTP API 生成日语音频
+        
+        需要 VoiceVox 引擎在本地运行 (默认端口 50021)。
+        
+        Args:
+            text: 日语文本
+            guild_id: 服务器 ID
+            
+        Returns:
+            音频文件路径 (WAV)，失败返回 None
+        """
+        try:
+            if not AIOHTTP_AVAILABLE:
+                logger.error("aiohttp 未安装，无法使用 VoiceVox TTS")
+                return None
+                
+            audio_file = self.temp_dir / f"tts_ja_{guild_id}_{hash(text)}.wav"
+            
+            if audio_file.exists():
+                return audio_file
+                
+            base_url = self.voicevox_url.rstrip('/')
+            speaker_id = self.tts_voice_ja_id
+            
+            async with aiohttp.ClientSession() as session:
+                # Step 1: 生成 audio_query
+                params = {"text": text, "speaker": speaker_id}
+                async with session.post(
+                    f"{base_url}/audio_query",
+                    params=params
+                ) as resp:
+                    if resp.status != 200:
+                        body = await resp.text()
+                        logger.error(f"VoiceVox audio_query 失败 ({resp.status}): {body}")
+                        return None
+                    query_data = await resp.json()
+                    
+                # 应用语速与音调设置
+                query_data["speedScale"] = self.tts_voicevox_speed
+                query_data["pitchScale"] = self.tts_voicevox_pitch
+                
+                # Step 2: 合成音频
+                async with session.post(
+                    f"{base_url}/synthesis",
+                    params={"speaker": speaker_id},
+                    json=query_data,
+                    headers={"Content-Type": "application/json"}
+                ) as resp:
+                    if resp.status != 200:
+                        body = await resp.text()
+                        logger.error(f"VoiceVox synthesis 失败 ({resp.status}): {body}")
+                        return None
+                    wav_data = await resp.read()
+                    
+            with open(audio_file, "wb") as f:
+                f.write(wav_data)
+            logger.info(f"[VoiceVox] 生成日语音频: {audio_file} (speaker={speaker_id})")
+            return audio_file
+            
+        except aiohttp.ClientConnectorError:
+            logger.error(
+                f"无法连接到 VoiceVox 引擎 ({self.voicevox_url})，"
+                "请确认 VoiceVox 已启动并监听该端口"
+            )
+            return None
+        except Exception as e:
+            logger.error(f"VoiceVox 生成音频失败: {e}")
             return None
             
     async def play_audio_queue(self, guild_id: int):
@@ -484,10 +600,15 @@ class DiscordVoiceTTS(Star):
     @filter.command("tts_config")
     async def config_tts(self, event: AstrMessageEvent):
         """配置 TTS 设置
-        
-        用法: /tts_config voice <语音名称>
-              /tts_config rate <语速>
-              /tts_config volume <音量>
+
+        用法:
+          /tts_config voice_zh <edge-tts 语音名>  - 设置中文语音 (edge-tts)
+          /tts_config voice_ja <VoiceVox Speaker ID>  - 设置日语语音 (VoiceVox, 整数 ID)
+          /tts_config rate <语速>  - edge-tts 语速 (如: +20%)
+          /tts_config volume <音量>  - edge-tts 音量 (如: +10%)
+          /tts_config voicevox_url <URL>  - VoiceVox 引擎地址 (默认 http://localhost:50021)
+          /tts_config voicevox_speed <速度>  - VoiceVox 语速倍率 (浮点数, 默认 1.0)
+          /tts_config voicevox_pitch <音调>  - VoiceVox 音调偏移 (浮点数, 默认 0.0)
         """
         try:
             message_str = event.message_str
@@ -496,26 +617,54 @@ class DiscordVoiceTTS(Star):
             if len(parts) < 3:
                 yield event.plain_result(
                     "用法:\n"
-                    "/tts_config voice <语音名称> - 设置语音\n"
-                    "/tts_config rate <语速> - 设置语速 (如: +20%)\n"
-                    "/tts_config volume <音量> - 设置音量 (如: +10%)"
+                    "/tts_config voice_zh <edge-tts 语音名> - 设置中文语音 (edge-tts)\n"
+                    "/tts_config voice_ja <Speaker ID> - 设置日语 VoiceVox 说话人 ID (整数)\n"
+                    "/tts_config rate <语速> - edge-tts 语速 (如: +20%)\n"
+                    "/tts_config volume <音量> - edge-tts 音量 (如: +10%)\n"
+                    "/tts_config voicevox_url <URL> - VoiceVox 引擎地址\n"
+                    "/tts_config voicevox_speed <倍率> - VoiceVox 语速 (如: 1.2)\n"
+                    "/tts_config voicevox_pitch <偏移> - VoiceVox 音调 (如: 0.05)"
                 )
                 return
                 
             config_type = parts[1].lower()
             config_value = parts[2]
             
-            if config_type == "voice":
-                self.tts_voice = config_value
-                yield event.plain_result(f"语音已设置为: {config_value}")
+            if config_type == "voice_zh":
+                self.tts_voice_zh = config_value
+                yield event.plain_result(f"中文语音 (edge-tts) 已设置为: {config_value}")
+            elif config_type == "voice_ja":
+                try:
+                    self.tts_voice_ja_id = int(config_value)
+                    yield event.plain_result(f"日语 VoiceVox 说话人 ID 已设置为: {config_value}")
+                except ValueError:
+                    yield event.plain_result("VoiceVox Speaker ID 必须为整数，例如: /tts_config voice_ja 2")
             elif config_type == "rate":
                 self.tts_rate = config_value
-                yield event.plain_result(f"语速已设置为: {config_value}")
+                yield event.plain_result(f"edge-tts 语速已设置为: {config_value}")
             elif config_type == "volume":
                 self.tts_volume = config_value
-                yield event.plain_result(f"音量已设置为: {config_value}")
+                yield event.plain_result(f"edge-tts 音量已设置为: {config_value}")
+            elif config_type == "voicevox_url":
+                self.voicevox_url = config_value
+                yield event.plain_result(f"VoiceVox 引擎地址已设置为: {config_value}")
+            elif config_type == "voicevox_speed":
+                try:
+                    self.tts_voicevox_speed = float(config_value)
+                    yield event.plain_result(f"VoiceVox 语速已设置为: {config_value}")
+                except ValueError:
+                    yield event.plain_result("VoiceVox 语速必须为浮点数，例如: /tts_config voicevox_speed 1.2")
+            elif config_type == "voicevox_pitch":
+                try:
+                    self.tts_voicevox_pitch = float(config_value)
+                    yield event.plain_result(f"VoiceVox 音调已设置为: {config_value}")
+                except ValueError:
+                    yield event.plain_result("VoiceVox 音调必须为浮点数，例如: /tts_config voicevox_pitch 0.05")
             else:
-                yield event.plain_result("未知的配置类型")
+                yield event.plain_result(
+                    f"未知的配置类型: {config_type}\n"
+                    "可用类型: voice_zh, voice_ja, rate, volume, voicevox_url, voicevox_speed, voicevox_pitch"
+                )
                 
         except Exception as e:
             logger.error(f"配置 TTS 失败: {e}")
@@ -557,17 +706,23 @@ class DiscordVoiceTTS(Star):
                 status_lines.append("队列状态: 未初始化")
                 
             # TTS 配置
-            status_lines.append(f"当前语音: {self.tts_voice}")
-            status_lines.append(f"当前语速: {self.tts_rate}")
-            status_lines.append(f"当前音量: {self.tts_volume}")
+            status_lines.append(f"中文语音 (edge-tts): {self.tts_voice_zh}")
+            status_lines.append(f"日语 VoiceVox Speaker ID: {self.tts_voice_ja_id}")
+            status_lines.append(f"edge-tts 语速: {self.tts_rate}")
+            status_lines.append(f"edge-tts 音量: {self.tts_volume}")
+            status_lines.append(f"VoiceVox 引擎地址: {self.voicevox_url}")
+            status_lines.append(f"VoiceVox 语速倍率: {self.tts_voicevox_speed}")
+            status_lines.append(f"VoiceVox 音调偏移: {self.tts_voicevox_pitch}")
             
             # TTS 引擎状态
+            engines = []
             if EDGE_TTS_AVAILABLE:
-                status_lines.append("TTS 引擎: edge-tts")
-            elif ASTRBOT_TTS_AVAILABLE:
-                status_lines.append("TTS 引擎: AstrBot TTS")
-            else:
-                status_lines.append("TTS 引擎: 无可用引擎")
+                engines.append("edge-tts (中文)")
+            if AIOHTTP_AVAILABLE:
+                engines.append("VoiceVox HTTP (日语)")
+            if ASTRBOT_TTS_AVAILABLE:
+                engines.append("AstrBot TTS")
+            status_lines.append(f"可用 TTS 引擎: {', '.join(engines) if engines else '无'}")
                 
             yield event.plain_result("\n".join(status_lines))
             
@@ -587,23 +742,35 @@ class DiscordVoiceTTS(Star):
 命令列表:
 /tts_join - 加入语音频道 (需要先在语音频道中)
 /tts_leave - 离开语音频道
-/tts <文本> - 将文本转换为语音并播放
+/tts <文本> - 将文本转换为语音并播放 (自动检测中/日语)
 /tts_stop - 停止当前 TTS 播放
-/tts_config voice <语音名称> - 设置语音
-/tts_config rate <语速> - 设置语速 (如: +20%)
-/tts_config volume <音量> - 设置音量 (如: +10%)
+/tts_config voice_zh <语音名> - 设置中文语音 (edge-tts)
+/tts_config voice_ja <Speaker ID> - 设置日语说话人 ID (VoiceVox)
+/tts_config rate <语速> - edge-tts 语速 (如: +20%)
+/tts_config volume <音量> - edge-tts 音量 (如: +10%)
+/tts_config voicevox_url <URL> - VoiceVox 引擎地址
+/tts_config voicevox_speed <倍率> - VoiceVox 语速 (如: 1.2)
+/tts_config voicevox_pitch <偏移> - VoiceVox 音调 (如: 0.05)
 /tts_status - 查看 TTS 状态
 /tts_help - 显示此帮助信息
+
+TTS 引擎说明:
+  • 中文/其他语言 → edge-tts (微软神经网络 TTS)
+  • 日语 (含假名) → VoiceVox HTTP API (本地引擎)
 
 示例:
 /tts_join
 /tts 你好，世界！
-/tts_config voice zh-CN-YunxiNeural
+/tts こんにちは！
+/tts_config voice_zh zh-CN-YunxiNeural
+/tts_config voice_ja 3
 /tts_config rate +10%
+/tts_config voicevox_url http://localhost:50021
+/tts_config voicevox_speed 1.2
 /tts_stop
 /tts_leave
 
-支持的语音 (edge-tts):
+支持的中文语音 (edge-tts):
 - zh-CN-XiaoxiaoNeural (女声，温柔)
 - zh-CN-YunxiNeural (男声，活泼)
 - zh-CN-YunjianNeural (男声，沉稳)
@@ -611,10 +778,19 @@ class DiscordVoiceTTS(Star):
 - en-US-AriaNeural (英文女声)
 - en-US-GuyNeural (英文男声)
 
+常用 VoiceVox Speaker ID:
+- 2  ずんだもん (默认)
+- 3  春日部つむぎ
+- 8  春日部つむぎ (ノーマル)
+- 13 青山龍星
+  (完整列表请访问 VoiceVox 官网或调用 /speakers API)
+
 注意事项:
 1. 需要安装 edge-tts: pip install edge-tts
-2. 需要安装 ffmpeg 并添加到系统 PATH
-3. 需要安装 pynacl: pip install pynacl
+2. 需要安装 aiohttp: pip install aiohttp
+3. 日语 TTS 需要本地运行 VoiceVox 引擎 (https://voicevox.hiroshiba.jp/)
+4. 需要安装 ffmpeg 并添加到系统 PATH
+5. 需要安装 pynacl: pip install pynacl
 """
         yield event.plain_result(help_text)
         

@@ -3,8 +3,12 @@
 # Discord API 库
 discord.py>=2.3.0
 
-# TTS 引擎 (推荐)
+# 中文 TTS 引擎 (edge-tts)
 edge-tts>=6.1.0
+
+# 日语 TTS 引擎 HTTP 客户端 (VoiceVox HTTP API)
+# VoiceVox 引擎需要单独下载并在本地运行: https://voicevox.hiroshiba.jp/
+aiohttp>=3.8.0
 
 # Discord 语音支持
 PyNaCl>=1.5.0
