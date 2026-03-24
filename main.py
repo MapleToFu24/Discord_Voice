@@ -524,7 +524,11 @@ class DiscordVoiceTTS(Star):
                 return
                 
             # 获取服务器信息
-            guild = event.message_obj.guild
+            channel = event.message_obj.channel
+            if not channel:
+                yield event.plain_result("无法获取频道信息")
+                return
+            guild = getattr(channel, 'guild', None) or getattr(channel, 'parent', None)
             if not guild:
                 yield event.plain_result("此命令只能在 Discord 服务器中使用")
                 return
