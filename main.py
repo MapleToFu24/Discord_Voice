@@ -96,6 +96,8 @@ class DiscordVoiceTTS(Star):
     async def initialize(self):
         """插件初始化"""
         logger.info("Discord Voice TTS 插件已初始化")
+        logger.debug(f"[DiscordVoiceTTS] Plugin context: {self.context}")
+        logger.debug(f"[DiscordVoiceTTS] TTS config - edge_tts: {EDGE_TTS_AVAILABLE}, aiohttp: {AIOHTTP_AVAILABLE}, astrbot_tts: {ASTRBOT_TTS_AVAILABLE}")
         
         # 检查依赖
         if not EDGE_TTS_AVAILABLE:
@@ -104,6 +106,83 @@ class DiscordVoiceTTS(Star):
             logger.warning("aiohttp 未安装，VoiceVox 日语 TTS 不可用。请运行: pip install aiohttp")
         if not EDGE_TTS_AVAILABLE and not AIOHTTP_AVAILABLE and not ASTRBOT_TTS_AVAILABLE:
             logger.error("没有可用的 TTS 引擎，请安装 edge-tts 和/或 aiohttp")
+
+    def _get_discord_bot_client(self):
+        """通过 AstrBot context 遍历平台适配器，获取 Discord bot/client 实例"""
+        try:
+            for platform in self.context.platform_insts:
+                platform_type = str(type(platform)).lower()
+                if 'discord' not in platform_type:
+                    continue
+                for attr in ['client', 'bot', '_client', '_bot', 'discord_client']:
+                    client = getattr(platform, attr, None)
+                    if client and hasattr(client, 'guilds'):
+                        return client
+        except Exception as e:
+            logger.error(f"[DiscordVoiceTTS] 获取 Discord bot client 失败: {e}")
+        return None
+
+    async def _resolve_guild_and_author(self, event: AstrMessageEvent):
+        """
+        尝试多种途径获取 discord.Guild 与 discord.Member。
+        
+        返回: (guild, author) 或 (None, None)
+        """
+        guild = None
+        author = None
+
+        # --- 途径 1: message_obj 本身就是原生 discord.Message ---
+        msg = event.message_obj
+        guild  = getattr(msg, 'guild',  None)
+        author = getattr(msg, 'author', None)
+        logger.debug(f"[resolve] 途径1 guild={guild}, author={author}")
+
+        # --- 途径 2: message_obj 包了一层 raw_message ---
+        if guild is None:
+            raw = getattr(msg, 'raw_message', None)
+            if raw:
+                guild  = getattr(raw, 'guild',  None)
+                author = getattr(raw, 'author', None) or author
+                logger.debug(f"[resolve] 途径2 (raw_message) guild={guild}, author={author}")
+
+        # --- 途径 3: 通过 channel → guild ---
+        if guild is None:
+            for obj in [msg, getattr(msg, 'raw_message', None)]:
+                if obj is None:
+                    continue
+                channel = getattr(obj, 'channel', None)
+                if channel:
+                    guild = getattr(channel, 'guild', None)
+                    if guild:
+                        logger.debug(f"[resolve] 途径3 (channel.guild) guild={guild}")
+                        break
+
+        # --- 途径 4: 通过 Discord bot client + channel_id 查找 ---
+        if guild is None:
+            bot = self._get_discord_bot_client()
+            if bot:
+                # 尝试从各种属性中取 channel_id
+                raw = getattr(msg, 'raw_message', None)
+                channel_id = (
+                    getattr(msg, 'channel_id', None)
+                    or getattr(raw, 'channel_id', None)
+                    or (getattr(getattr(msg, 'channel', None), 'id', None))
+                    or (getattr(getattr(raw, 'channel', None), 'id', None) if raw else None)
+                )
+                if channel_id:
+                    ch = bot.get_channel(int(channel_id))
+                    if ch:
+                        guild = getattr(ch, 'guild', None)
+                        logger.debug(f"[resolve] 途径4 (bot.get_channel) channel_id={channel_id}, guild={guild}")
+
+        if guild is None:
+            logger.warning(
+                f"[resolve] 所有途径均无法获取 guild。\n"
+                f"  message_obj type  : {type(msg)}\n"
+                f"  message_obj attrs : {[a for a in dir(msg) if not a.startswith('__')]}"
+            )
+
+        return guild, author
             
     async def terminate(self):
         """插件销毁时清理资源"""
@@ -442,29 +521,21 @@ class DiscordVoiceTTS(Star):
         需要用户在语音频道中
         """
         try:
-            # 获取用户所在的语音频道
-            guild = event.message_obj.guild
+            guild, user = await self._resolve_guild_and_author(event)
             if not guild:
                 yield event.plain_result("此命令只能在 Discord 服务器中使用")
                 return
-                
-            # 获取用户
-            user = event.message_obj.author
-            if not user:
-                yield event.plain_result("无法获取用户信息")
-                return
-                
-            # 获取用户的语音状态
+
             member = guild.get_member(user.id)
             if not member or not member.voice:
                 yield event.plain_result("您需要先加入一个语音频道")
                 return
-                
+
             voice_channel = member.voice.channel
             if not voice_channel:
                 yield event.plain_result("您需要先加入一个语音频道")
                 return
-                
+
             # 连接到语音频道
             voice_client = await self.connect_to_voice_channel(voice_channel)
             if voice_client:
@@ -483,11 +554,11 @@ class DiscordVoiceTTS(Star):
         用法: /dv_tts_leave
         """
         try:
-            guild = event.message_obj.guild
+            guild, _ = await self._resolve_guild_and_author(event)
             if not guild:
                 yield event.plain_result("此命令只能在 Discord 服务器中使用")
                 return
-                
+
             guild_id = guild.id
             
             if guild_id not in self.voice_clients:
@@ -509,59 +580,42 @@ class DiscordVoiceTTS(Star):
         将文本转换为语音并播放（自动检测中文/日语）
         """
         try:
-            # 获取文本
             text = event.message_str
-            if not text:
-                yield event.plain_result("请提供要转换的文本")
-                return
-                
-            # 移除命令部分
             if text.startswith("/dv_tts"):
                 text = text[7:].strip()
-                
             if not text:
                 yield event.plain_result("请提供要转换的文本")
                 return
-                
-            # 获取服务器信息
-            channel = getattr(event.message_obj, 'channel', None)
-            if not channel:
-                yield event.plain_result("无法获取频道信息或此命令只能在 Discord 服务器中使用")
-                return
-            guild = getattr(channel, 'guild', None) or getattr(channel, 'parent', None)
+
+            guild, user = await self._resolve_guild_and_author(event)
             if not guild:
                 yield event.plain_result("此命令只能在 Discord 服务器中使用")
                 return
-                
+
             guild_id = guild.id
-            
-            # 检查是否已连接到语音频道
+
             if guild_id not in self.voice_clients:
-                # 尝试自动加入用户所在的语音频道
-                user = event.message_obj.author
                 member = guild.get_member(user.id)
                 if member and member.voice and member.voice.channel:
                     voice_client = await self.connect_to_voice_channel(member.voice.channel)
                     if not voice_client:
-                        yield event.plain_result("无法加入语音频道，请先使用 /tts_join 命令")
+                        yield event.plain_result("无法加入语音频道，请先使用 /dv_tts_join 命令")
                         return
                 else:
-                    yield event.plain_result("请先使用 /tts_join 命令加入语音频道")
+                    yield event.plain_result("请先使用 /dv_tts_join 命令加入语音频道")
                     return
-                    
-            # 生成 TTS 音频
+
             audio_file = await self.generate_tts_audio(text, guild_id)
             if not audio_file:
                 yield event.plain_result("生成语音失败")
                 return
-                
-            # 添加到播放队列
+
             if guild_id in self.audio_queues:
                 await self.audio_queues[guild_id].put(audio_file)
-                yield event.plain_result(f"已添加到播放队列: {text[:50]}...")
+                preview = text[:50] + ("..." if len(text) > 50 else "")
+                yield event.plain_result(f"已添加到播放队列: {preview}")
             else:
                 yield event.plain_result("播放队列未初始化")
-                
         except Exception as e:
             logger.error(f"TTS 命令执行失败: {e}")
             yield event.plain_result(f"TTS 命令执行失败: {str(e)}")
@@ -573,30 +627,26 @@ class DiscordVoiceTTS(Star):
         用法: /dv_tts_stop
         """
         try:
-            guild = event.message_obj.guild
+            guild, _ = await self._resolve_guild_and_author(event)
             if not guild:
                 yield event.plain_result("此命令只能在 Discord 服务器中使用")
                 return
-                
+
             guild_id = guild.id
             
             if guild_id not in self.voice_clients:
                 yield event.plain_result("当前未连接到任何语音频道")
                 return
-                
-            # 打断当前播放
+
             await self.interrupt_current_playback(guild_id)
-            
-            # 清空队列
             if guild_id in self.audio_queues:
                 while not self.audio_queues[guild_id].empty():
                     try:
                         self.audio_queues[guild_id].get_nowait()
                     except asyncio.QueueEmpty:
                         break
-                        
+
             yield event.plain_result("已停止 TTS 播放")
-            
         except Exception as e:
             logger.error(f"停止 TTS 失败: {e}")
             yield event.plain_result(f"停止 TTS 失败: {str(e)}")
@@ -681,35 +731,29 @@ class DiscordVoiceTTS(Star):
         用法: /dv_tts_status
         """
         try:
-            guild = event.message_obj.guild
+            guild, _ = await self._resolve_guild_and_author(event)
             if not guild:
                 yield event.plain_result("此命令只能在 Discord 服务器中使用")
                 return
-                
+
             guild_id = guild.id
-            
-            status_lines = []
-            status_lines.append("=== TTS 状态 ===")
-            
-            # 连接状态
+            status_lines = ["=== TTS 状态 ==="]
+
             if guild_id in self.voice_clients:
-                voice_client = self.voice_clients[guild_id]
-                if voice_client.is_connected():
-                    status_lines.append(f"语音频道: {voice_client.channel.name}")
+                vc = self.voice_clients[guild_id]
+                if vc.is_connected():
+                    status_lines.append(f"语音频道: {vc.channel.name}")
                     status_lines.append(f"播放状态: {'播放中' if self.is_playing[guild_id] else '空闲'}")
                 else:
                     status_lines.append("语音连接: 已断开")
             else:
                 status_lines.append("语音连接: 未连接")
-                
-            # 队列状态
+
             if guild_id in self.audio_queues:
-                queue_size = self.audio_queues[guild_id].qsize()
-                status_lines.append(f"队列长度: {queue_size}")
+                status_lines.append(f"队列长度: {self.audio_queues[guild_id].qsize()}")
             else:
                 status_lines.append("队列状态: 未初始化")
-                
-            # TTS 配置
+
             status_lines.append(f"中文语音 (edge-tts): {self.tts_voice_zh}")
             status_lines.append(f"日语 VoiceVox Speaker ID: {self.tts_voice_ja_id}")
             status_lines.append(f"edge-tts 语速: {self.tts_rate}")
@@ -717,8 +761,7 @@ class DiscordVoiceTTS(Star):
             status_lines.append(f"VoiceVox 引擎地址: {self.voicevox_url}")
             status_lines.append(f"VoiceVox 语速倍率: {self.tts_voicevox_speed}")
             status_lines.append(f"VoiceVox 音调偏移: {self.tts_voicevox_pitch}")
-            
-            # TTS 引擎状态
+
             engines = []
             if EDGE_TTS_AVAILABLE:
                 engines.append("edge-tts (中文)")
@@ -727,9 +770,8 @@ class DiscordVoiceTTS(Star):
             if ASTRBOT_TTS_AVAILABLE:
                 engines.append("AstrBot TTS")
             status_lines.append(f"可用 TTS 引擎: {', '.join(engines) if engines else '无'}")
-                
+
             yield event.plain_result("\n".join(status_lines))
-            
         except Exception as e:
             logger.error(f"获取 TTS 状态失败: {e}")
             yield event.plain_result(f"获取 TTS 状态失败: {str(e)}")
