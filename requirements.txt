@@ -1,7 +1,8 @@
 # Discord Voice TTS 插件依赖
 
 # Discord API 库
-discord.py[voice]>=2.3.0
+discord.py>=2.3.0
+davey>=0.1.0
 
 # 中文 TTS 引擎 (edge-tts)
 edge-tts>=6.1.0
