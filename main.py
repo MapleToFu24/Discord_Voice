@@ -131,6 +131,18 @@ class DiscordVoiceTTS(Star):
         guild = None
         author = None
 
+        # --- 途径 0: 直接从 event 获取原生 Discord 消息对象 ---
+        try:
+            raw = getattr(event, 'raw_message', None) or event.get_extra("raw_message")
+            if raw and hasattr(raw, 'guild') and hasattr(raw, 'author'):
+                guild = getattr(raw, 'guild', None)
+                author = getattr(raw, 'author', None)
+                if guild is not None and author is not None:
+                    logger.debug(f"[resolve] 途径0 (event.raw_message) guild={guild.name}, author={author.name}")
+                    return guild, author
+        except Exception as e:
+            logger.debug(f"[resolve] 途径0 失败: {e}")
+
         # --- 途径 1: message_obj 本身就是原生 discord.Message ---
         msg = event.message_obj
         guild  = getattr(msg, 'guild',  None)
@@ -342,117 +354,280 @@ class DiscordVoiceTTS(Star):
             logger.error(f"VoiceVox 生成音频失败: {e}")
             return None
             
-    async def play_audio_queue(self, guild_id: int):
-        """播放音频队列
-        
-        Args:
-            guild_id: 服务器 ID
-        """
-        voice_client = self.voice_clients.get(guild_id)
-        if not voice_client:
-            return
-            
-        queue = self.audio_queues.get(guild_id)
-        if not queue:
-            return
-            
-        while True:
-            try:
-                # 等待队列中的音频文件
-                audio_file = await queue.get()
+
                 
-                if audio_file is None:
-                    # None 表示停止信号
-                    break
-                    
-                if not voice_client.is_connected():
-                    logger.warning("语音客户端已断开，停止播放队列")
-                    break
-                    
-                # 检查文件是否存在
-                if not audio_file.exists():
-                    logger.warning(f"音频文件不存在: {audio_file}")
-                    queue.task_done()
-                    continue
-                    
-                # 播放音频
-                self.is_playing[guild_id] = True
-                logger.info(f"开始播放音频: {audio_file}")
-                
-                # 使用 FFmpegPCMAudio 播放
-                audio_source = discord.FFmpegPCMAudio(
-                    str(audio_file),
-                    options="-vn"  # 不处理视频
-                )
-                
-                # 如果需要音量控制，使用 PCMVolumeTransformer
-                # audio_source = discord.PCMVolumeTransformer(audio_source, volume=1.0)
-                
-                voice_client.play(audio_source)
-                
-                # 等待播放完成
-                while voice_client.is_playing():
-                    await asyncio.sleep(0.1)
-                    
-                self.is_playing[guild_id] = False
-                logger.info(f"音频播放完成: {audio_file}")
-                
-                # 清理临时文件（可选）
-                # audio_file.unlink(missing_ok=True)
-                
-                queue.task_done()
-                
-            except asyncio.CancelledError:
-                logger.info("音频队列任务被取消")
-                break
-            except Exception as e:
-                logger.error(f"播放音频时出错: {e}")
-                self.is_playing[guild_id] = False
-                queue.task_done()
-                
-    async def connect_to_voice_channel(self, channel: VoiceChannel) -> Optional[VoiceClient]:
-        """连接到语音频道
-        
-        Args:
-            channel: 语音频道
-            
-        Returns:
-            VoiceClient 对象，失败返回 None
-        """
+    async def connect_to_voice_channel(self, channel):
         try:
-            guild_id = channel.guild.id
-            
-            # 检查是否已连接
-            if guild_id in self.voice_clients:
-                voice_client = self.voice_clients[guild_id]
-                if voice_client.is_connected():
-                    # 如果已在同一频道，直接返回
-                    if voice_client.channel.id == channel.id:
-                        return voice_client
-                    # 如果在不同频道，先断开
-                    await voice_client.disconnect()
-                    
-            # 连接到语音频道
-            voice_client = await channel.connect()
-            self.voice_clients[guild_id] = voice_client
-            
-            # 初始化音频队列
-            if guild_id not in self.audio_queues:
-                self.audio_queues[guild_id] = asyncio.Queue()
-                
-            # 启动播放队列任务
-            if guild_id not in self.queue_tasks or self.queue_tasks[guild_id].done():
-                self.queue_tasks[guild_id] = asyncio.create_task(
-                    self.play_audio_queue(guild_id)
-                )
-                
-            logger.info(f"已连接到语音频道: {channel.name} (服务器: {channel.guild.name})")
-            return voice_client
-            
-        except Exception as e:
-            logger.error(f"连接语音频道失败: {e}")
+            guild = channel.guild
+            guild_id = guild.id
+
+            # ── 步骤 1：优先检查 discord.py 内部的 guild.voice_client ──
+            # 这能捕获"本地字典没有、但 discord.py 内部已连接"的残留状态
+            existing_vc = guild.voice_client
+
+            if existing_vc is not None:
+                if existing_vc.is_connected():
+                    if existing_vc.channel.id == channel.id:
+                        # 已在目标频道，直接复用，同步进本地字典
+                        logger.info(f"[connect] 复用已有连接: {channel.name}")
+                        self.voice_clients[guild_id] = existing_vc
+                        if guild_id not in self.audio_queues:
+                            self.audio_queues[guild_id] = asyncio.Queue()
+                        if guild_id not in self.is_playing:
+                            self.is_playing[guild_id] = False
+                            asyncio.create_task(self._play_queue_loop(guild_id))
+                            asyncio.create_task(self._keepalive_loop(guild_id))
+                        return existing_vc
+                    else:
+                        # 已连接但在其他频道，强制断开再重连
+                        logger.info(f"[connect] 已连接到其他频道 ({existing_vc.channel.name})，断开后重连")
+                        try:
+                            await existing_vc.disconnect(force=True)
+                        except Exception as e:
+                            logger.warning(f"[connect] 断开旧连接时出错（忽略）: {e}")
+                        # 确保 guild.voice_client 被清除，防止残留状态
+                        guild._voice_client = None
+                else:
+                    # 对象存在但已断线，强制清理
+                    logger.warning(f"[connect] 发现已断线的残留 voice_client，强制清理")
+                    try:
+                        await existing_vc.disconnect(force=True)
+                    except Exception:
+                        pass
+
+            # ── 步骤 2：清理本地字典中的旧记录 ──
+            old_vc = self.voice_clients.pop(guild_id, None)
+            if old_vc is not None and old_vc is not existing_vc:
+                try:
+                    await old_vc.disconnect(force=True)
+                except Exception:
+                    pass
+
+            # 等待 discord.py 内部状态完全释放
+            await asyncio.sleep(0.5)
+
+            # ── 步骤 3：重试连接，最多 3 次 ──
+            for attempt in range(1, 4):
+                try:
+                    logger.info(f"[connect] 尝试连接语音频道: {channel.name} (第 {attempt} 次)")
+                    voice_client = await channel.connect(timeout=30.0, reconnect=True)
+
+                    # 等待 WebSocket 握手稳定
+                    for _ in range(10):
+                        await asyncio.sleep(0.3)
+                        if voice_client.is_connected():
+                            break
+                    else:
+                        logger.warning(f"[connect] 连接后 is_connected() 仍为 False，重试...")
+                        try:
+                            await voice_client.disconnect(force=True)
+                        except Exception:
+                            pass
+                        await asyncio.sleep(1)
+                        continue
+
+                    self.voice_clients[guild_id] = voice_client
+
+                    if guild_id not in self.audio_queues:
+                        self.audio_queues[guild_id] = asyncio.Queue()
+                    self.is_playing[guild_id] = False
+
+                    asyncio.create_task(self._play_queue_loop(guild_id))
+                    asyncio.create_task(self._keepalive_loop(guild_id))
+
+                    logger.info(f"[connect] 已成功连接: {channel.name} (服务器: {guild.name})")
+                    return voice_client
+
+                except discord.ClientException as e:
+                    # 捕获 "Already connected" 等 discord.py 级别的异常
+                    logger.error(f"[connect] discord.ClientException (尝试 {attempt}/3): {e}")
+                    # 再次尝试强制获取并断开
+                    vc = guild.voice_client
+                    if vc is not None:
+                        try:
+                            await vc.disconnect(force=True)
+                        except Exception:
+                            pass
+                    await asyncio.sleep(1.5)
+
+                except Exception as e:
+                    logger.error(f"[connect] 未知错误 (尝试 {attempt}/3): {e}")
+                    await asyncio.sleep(2)
+
+            logger.error(f"[connect] 语音频道连接最终失败: {channel.name}")
             return None
-            
+        except Exception as e:
+            # 所有异常必须在此处被吞掉，不能让它逃逸到框架层
+            logger.error(f"[connect_to_voice_channel] 未捕获异常: {e}", exc_info=True)
+            return None   # ← 返回 None，绝不 raise
+
+    # ─────────────────────────────────────────────
+    #  Keepalive：定期检查连接，断线自动重连
+    # ─────────────────────────────────────────────
+    async def _keepalive_loop(self, guild_id: int):
+        logger.debug(f"[keepalive] guild {guild_id} keepalive 任务启动")
+        reconnect_channel = None
+
+        while guild_id in self.voice_clients:
+            await asyncio.sleep(20)  # 每 20 秒检查一次
+
+            if guild_id not in self.voice_clients:
+                break
+
+            vc = self.voice_clients[guild_id]
+            reconnect_channel = vc.channel  # 记录频道用于重连
+
+            if vc.is_connected():
+                logger.debug(f"[keepalive] guild {guild_id} 连接正常")
+                continue
+
+            # ── 断线重连 ──
+            logger.warning(f"[keepalive] guild {guild_id} 检测到连接断开，尝试重连: {reconnect_channel.name}")
+            try:
+                # 检查是否已经连接到目标频道（可能被其他进程重新连接）
+                guild = vc.guild  # 获取 guild 对象
+                existing_vc = guild.voice_client
+                
+                if existing_vc is not None and existing_vc.is_connected():
+                    if existing_vc.channel.id == reconnect_channel.id:
+                        # 已在目标频道，直接复用
+                        logger.info(f"[keepalive] 已在目标频道 {reconnect_channel.name}，复用连接")
+                        self.voice_clients[guild_id] = existing_vc
+                        continue
+                    else:
+                        # 已连接但到其他频道，先断开
+                        logger.info(f"[keepalive] 从 {existing_vc.channel.name} 移动到 {reconnect_channel.name}")
+                        try:
+                            await existing_vc.disconnect(force=True)
+                        except Exception as e:
+                            logger.warning(f"[keepalive] 断开旧连接时出错（忽略）: {e}")
+                elif existing_vc is not None:
+                    # 对象存在但已断线，强制清理
+                    logger.warning(f"[keepalive] 发现已断线的残留 voice_client，强制清理")
+                    try:
+                        await existing_vc.disconnect(force=True)
+                    except Exception:
+                        pass
+
+                # 清理旧客户端引用
+                self.voice_clients.pop(guild_id, None)
+                try:
+                    await vc.disconnect(force=True)
+                except Exception:
+                    pass
+
+                new_vc = await reconnect_channel.connect(timeout=30.0, reconnect=True)
+
+                # 等待稳定
+                for _ in range(10):
+                    await asyncio.sleep(0.3)
+                    if new_vc.is_connected():
+                        break
+
+                if new_vc.is_connected():
+                    self.voice_clients[guild_id] = new_vc
+                    self.is_playing[guild_id] = False
+                    logger.info(f"[keepalive] guild {guild_id} 重连成功: {reconnect_channel.name}")
+                    # 重启播放队列（旧的已经退出）
+                    asyncio.create_task(self._play_queue_loop(guild_id))
+                else:
+                    logger.error(f"[keepalive] guild {guild_id} 重连后仍未稳定，放弃")
+                    self.voice_clients.pop(guild_id, None)
+                    break
+
+            except Exception as e:
+                logger.error(f"[keepalive] guild {guild_id} 重连失败: {e}")
+                self.voice_clients.pop(guild_id, None)
+                break
+
+        logger.debug(f"[keepalive] guild {guild_id} keepalive 任务结束")
+
+    # ─────────────────────────────────────────────
+    #  播放队列（含断线重连 + 文件自动清理）
+    # ─────────────────────────────────────────────
+    async def _play_queue_loop(self, guild_id: int):
+        logger.debug(f"[play_queue] guild {guild_id} 播放队列任务启动")
+
+        while guild_id in self.voice_clients:
+            # 等待队列中有音频
+            try:
+                audio_file = await asyncio.wait_for(
+                    self.audio_queues[guild_id].get(),
+                    timeout=2.0
+                )
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                logger.error(f"[play_queue] 队列读取失败: {e}")
+                break
+
+            if guild_id not in self.voice_clients:
+                break
+
+            vc = self.voice_clients[guild_id]
+
+            # ── 若连接断开，等待 keepalive 重连，最多等 15 秒 ──
+            if not vc.is_connected():
+                logger.warning(f"[play_queue] guild {guild_id} 播放前发现连接断开，等待重连...")
+                for _ in range(30):
+                    await asyncio.sleep(0.5)
+                    if guild_id not in self.voice_clients:
+                        break
+                    vc = self.voice_clients[guild_id]
+                    if vc.is_connected():
+                        break
+                else:
+                    logger.error(f"[play_queue] guild {guild_id} 等待重连超时，丢弃当前音频")
+                    self._cleanup_audio_file(audio_file)
+                    continue
+
+            if guild_id not in self.voice_clients:
+                self._cleanup_audio_file(audio_file)
+                break
+
+            # ── 实际播放 ──
+            self.is_playing[guild_id] = True
+            play_done = asyncio.Event()
+
+            def after_play(error):
+                if error:
+                    logger.error(f"[play_queue] 播放回调错误: {error}")
+                play_done.set()
+
+            try:
+                source = discord.FFmpegPCMAudio(
+                    audio_file,
+                    before_options="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
+                )
+                vc.play(source, after=after_play)
+
+                # 等待播放结束，同时守护连接状态
+                while not play_done.is_set():
+                    await asyncio.sleep(0.5)
+                    if guild_id in self.voice_clients and not self.voice_clients[guild_id].is_connected():
+                        logger.warning(f"[play_queue] 播放中途连接断开，中止当前片段")
+                        try:
+                            vc.stop()
+                        except Exception:
+                            pass
+                        break
+
+            except Exception as e:
+                logger.error(f"[play_queue] 播放异常: {e}")
+            finally:
+                self.is_playing[guild_id] = False
+                self._cleanup_audio_file(audio_file)
+
+        logger.debug(f"[play_queue] guild {guild_id} 播放队列任务结束")
+
+    def _cleanup_audio_file(self, filepath: str):
+        """安全删除临时音频文件"""
+        try:
+            if filepath and os.path.exists(filepath):
+                os.remove(filepath)
+        except Exception as e:
+            logger.debug(f"[cleanup] 删除临时文件失败: {e}")
+
     async def disconnect_from_voice_channel(self, guild_id: int):
         """断开语音频道连接
         
@@ -538,14 +713,14 @@ class DiscordVoiceTTS(Star):
 
             # 连接到语音频道
             voice_client = await self.connect_to_voice_channel(voice_channel)
-            if voice_client:
-                yield event.plain_result(f"已加入语音频道: {voice_channel.name}")
-            else:
+            if voice_client is None:
                 yield event.plain_result("加入语音频道失败")
-                
+            else:
+                yield event.plain_result(f"已加入: {voice_channel.name}")
         except Exception as e:
-            logger.error(f"加入语音频道失败: {e}")
-            yield event.plain_result(f"加入语音频道失败: {str(e)}")
+            # 所有异常必须在此处被吞掉，不能让它逃逸到框架层
+            logger.error(f"[join_voice_channel] 未捕获异常: {e}", exc_info=True)
+            yield event.plain_result(f"加入失败: {e}")
             
     @filter.command("dv_tts_leave")
     async def leave_voice_channel(self, event: AstrMessageEvent):
